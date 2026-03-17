@@ -1,0 +1,63 @@
+name: CD Deploy Serving
+
+on:
+  workflow_dispatch:
+  workflow_run:
+    workflows:
+      - API Docker Build
+      - UI Docker Build
+    types:
+      - completed
+
+jobs:
+  deploy:
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Validate required secrets
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+          GHCR_USERNAME: ${{ secrets.GHCR_USERNAME }}
+          GHCR_PAT: ${{ secrets.GHCR_PAT }}
+        run: |
+          for key in DEPLOY_HOST DEPLOY_USER DEPLOY_SSH_KEY DEPLOY_PATH GHCR_USERNAME GHCR_PAT; do
+            if [ -z "${!key}" ]; then
+              echo "Missing required secret: $key"
+              exit 1
+            fi
+          done
+
+      - name: Prepare SSH key
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -H "${{ secrets.DEPLOY_HOST }}" >> ~/.ssh/known_hosts
+
+      - name: Deploy API and UI via SSH
+        env:
+          REPO_LC: ${{ github.repository }}
+        run: |
+          REPO_LC=$(echo "$REPO_LC" | tr '[:upper:]' '[:lower:]')
+          IMAGE_API="ghcr.io/${REPO_LC}:main"
+          IMAGE_UI="ghcr.io/${REPO_LC}-ui:main"
+
+          ssh -i ~/.ssh/id_rsa "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}" << EOF
+          set -e
+          cd "${{ secrets.DEPLOY_PATH }}"
+
+          echo "${{ secrets.GHCR_PAT }}" | docker login ghcr.io -u "${{ secrets.GHCR_USERNAME }}" --password-stdin
+
+          export API_IMAGE="${IMAGE_API}"
+          export UI_IMAGE="${IMAGE_UI}"
+
+          docker compose pull api ui
+          docker compose up -d --force-recreate api ui
+          docker compose ps
+          EOF
